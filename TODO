@@ -1,0 +1,129 @@
+- Load/Save gcj
+
+----
+
+(TextTools) flashing menu items longer than the screen aren't truncated
+(ie. TIA's quick open list).
+
+Subject: gdb and TIA
+Date: Mon, 03 Jul 2000 09:36:32 -0400 (EDT)
+From: "Ken O. Burtch" <ken@tiamet.vaxxine.com>
+To: kburtch@sympatico.ca
+
+Ken O. Burtch: System Manager in a Box / Lintel       : Pegasoft
+http://www.vaxxine.com/pegasoft                       : R.R.#1
+Bio: 34;Bsc,UI,Lang,Games;Toons,Elves,SF,Pizza;Xian   : Jordan Station, ON
+``````````````````````````````````````````````````````` Canada L0R 1S0
+
+---------- Forwarded message ----------
+Date: Wed, 5 Jan 2000 21:03:18 -0500
+From: Ken O. Burtch <ken@tiamet.vaxxine.com>
+To: ken@tiamet.vaxxine.com
+
+Newsgroups: tiamet.list.ada-linux-team
+Path: tiamet!adalin-l
+From: adalin-l@tiamet.vaxxine.com (PegaSoft Canada - ALT Drop Box)
+Subject: problem with debuging on Suse Linux 6.1
+Distribution: local
+Organization: Pegasoft of Canada (Games, Utils, Usenet)
+Message-ID: <Fnsx2u.D26@tiamet.vaxxine.com>
+Date: Tue, 4 Jan 2000 08:04:06 GMT
+
+>From owner-gnatlist@SEAS.GWU.EDU  Mon Jan  3 15:31:02 2000
+Return-Path: <owner-gnatlist@SEAS.GWU.EDU>
+Received: (from uucp@localhost) by tiamet.vaxxine.com (8.8.5/8.8.3) with UUCP id PAA13073 for adalin-l@tiamet; Mon, 3 Jan 2000 15:30:20 -0500
+Received: from seas.gwu.edu (osgood.seas.gwu.edu [128.164.9.13])
+        by alpha.vaxxine.com (8.9.2/8.8.5) with ESMTP id NAA32633
+        for <adalin-l@tiamet.vaxxine.com>; Mon, 3 Jan 2000 13:23:07 -0500 (EST)
+Received: from host (localhost [127.0.0.1])
+        by seas.gwu.edu (v8) with SMTP id NAA14840; Mon, 3 Jan 2000 13:16:15 -0500 (EST)
+Received: from mail1.gmx.net (mail1.gmx.net [194.221.183.61])
+        by seas.gwu.edu (v8) with SMTP id NAA14813
+        for <gnatlist@SEAS.GWU.EDU>; Mon, 3 Jan 2000 13:16:02 -0500 (EST)
+Received: (qmail 30075 invoked by uid 0); 3 Jan 2000 18:16:01 -0000
+Received: from pd4b89553.dip.t-dialin.net (HELO book.pfeifer.priv) (212.184.149.83)
+  by mail1.gmx.net with SMTP; 3 Jan 2000 18:16:01 -0000
+Received: from tower (tower.pfeifer.priv [222.222.222.1])
+        by book.pfeifer.priv (8.9.3/8.9.3) with SMTP id OAA23163
+        for <gnatlist@SEAS.GWU.EDU>; Mon, 3 Jan 2000 14:33:00 +0100
+Message-Id: <NCBBKECBPDLPDDEPKHBNCEHHCLAA.juergen.pfeifer@gmx.net>
+Date: Mon, 3 Jan 2000 14:33:00 +0100
+Reply-To: gnatlist@SEAS.GWU.EDU
+Sender: owner-gnatlist@SEAS.GWU.EDU
+Precedence: bulk
+From: "Juergen Pfeifer" <juergen.pfeifer@gmx.net>
+To: <gnatlist@SEAS.GWU.EDU>
+Subject: RE: problem with debuging on Suse Linux 6.1
+In-Reply-To: <Pine.SOL.4.21.0001031000030.1354-100000@struts.ii.uib.no>
+MIME-Version: 1.0
+Content-Type: text/plain;
+        charset="iso-8859-1"
+Content-Transfer-Encoding: 8bit
+X-Priority: 3 (Normal)
+X-MSMail-Priority: Normal
+X-Mailer: Microsoft Outlook IMO, Build 9.0.2416 (9.0.2910.0)
+X-MimeOLE: Produced By Microsoft MimeOLE V5.00.2919.6700
+X-Listprocessor-Version: 8.1 -- ListProcessor(tm) by CREN
+Status: RO
+
+This is "correct" behaviour. gdb doesn't initially load the
+GNAT (and other) shared libraries. They are loaded on demand.
+What you should do is set a breakpoint on "main" and then
+run the program. When it breaks on "main", the shared libraries
+are loaded and you can proceed as usual.
+
+Cheers
+Jürgen
+
+-----Original Message-----
+From: owner-gnatlist@SEAS.GWU.EDU [mailto:owner-gnatlist@SEAS.GWU.EDU]On
+Behalf Of Gisle S{lensminde
+Sent: Monday, January 03, 2000 10:12 AM
+To: gnatlist@SEAS.GWU.EDU
+Subject: problem with debuging on Suse Linux 6.1
+
+I installed the correct RPM's for GNAT and gnatgdb  on my
+computer which runs SuSE Linux 6.1. The problem is that
+gdb not is able to set breakpoint on the exception
+functions in the gnat runtime, neither with 'break exceprtion'
+nor by seting the breakpoint manually with a command like
+'break __gnat_raise_constraint_error'. While I links statically,
+and not use the shared libraries for runtime there is no
+problems.
+
+I think I hve installed the right RPM's.
+
+--
+Gisle Sælensminde ( gisle@ii.uib.no )
+
+ln -s /dev/null ~/.netscape/cookies
+
+--
+Ken O. Burtch: System Manager in a Box / Lintel       : Pegasoft
+http://www.vaxxine.com/pegasoft;ken@tiamet.vaxxine.com: R.R.#1
+Bio: 33;Bsc,UI,Lang,Games;Toons,Elves,SF,Pizza;Xian   : Jordan Station, ON
+``````````````````````````````````````````````````````` Canada L0R 1S0
+
+2. Parallel compiling needed.  Names for up to four computer defined in
+   tiacommon, and processor locking implemented, but at present, only
+   first is used.
+
+3. More support for other languages.
+
+5. Cursor horizontal position not reset when new files are opened.  Maybe fixed?
+
+7. Shared Library support not implemented.
+
+8. Need undo and repeat typing.  For this, you need to add the appropriate
+   methods to the ASourceEditList control.
+
+9. Scrolling left and right in ASourceEditList control.
+
+10. Rewrite the debugger so you can send input to the running program
+    while waiting on the output from the debugger.  The debugger waits
+    indefinitely if the program is waiting for input.
+
+11. (Texttools) Hilighting is case-sensitive.
+
+12. Warning on opening very large files or binary files.
+

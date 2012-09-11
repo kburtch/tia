@@ -1,0 +1,1967 @@
+-- text editor
+
+with ada.text_io, -- for printing results in non-interactive modes
+     ada.command_line, -- for return result code
+     common,
+     os,        -- clock and O/S stuff for Ken's windows
+     strings,   -- Ken's string functions
+     userio,    -- Ken's ASCII drawing stuff
+     controls,  -- controls for Ken's windows
+     windows,   -- Ken's windows
+     english,
+     tiacommon;
+use  common, os, strings, userio, controls, windows, english,
+     tiacommon;
+
+Pragma Optimize( Space ); -- make program as small as possible
+
+
+procedure tia is ---------------------------------------------------
+
+-- Main Program ================================================
+
+  SourceBox  : aliased ASourceEditList;
+  SourceBar  : aliased AScrollBar;
+
+  Done       : boolean := false; -- quitting program
+
+  Text2Find     : str255  := NullStr255;
+  Text2Replace  : str255  := NullStr255;
+  FindBackwards : boolean := false;
+  Replacing     : boolean := false;
+
+  procedure EditMacros is
+    MacroList : Str255List.List;
+    MacrosToSave : Str255List.List;
+    WasChanges : boolean;
+    s : str255;
+  begin
+    if NotEmpty( To255( "$SYS/macro_file" ) ) then
+       LoadList( To255( "$SYS/macro_file" ), MacroList );
+    end if;
+    Str255List.Queue( MacroList, NullStr255 );
+    EditListInfo( "Macro List", 0, 0, 79, 24, MacroList, WasChanges );
+    if WasChanges then
+       while Str255List.length( MacroList ) > 0 loop
+             Str255List.Pull( MacroList, s );
+             if length( s ) > 0 then
+                Str255List.Push( MacrosToSave, s );
+             end if;
+       end loop;
+       SaveList( To255( "$SYS/macro_file" ), MacrosToSave );
+       if LastError = CoreOK then
+          NoteAlert( "Restart the program to see changes." );
+       else
+          SessionLog( "EditMacros: Error saving file", LastError );
+          StopAlert( "Error saving file: # " & AnErrorCode'image(
+            LastError ) );
+       end if;
+       Str255List.Clear( MacrosToSave );
+    end if;
+    Str255List.Clear( MacroList );
+  end EditMacros;
+
+  function FindDialog return boolean is
+    TextLine        : aliased AnEditLine;
+    FindButton      : aliased ASimpleButton;
+    CancelButton    : aliased ASimpleButton;
+    BackwardsButton : aliased ACheckBox;
+    ReplaceButton   : aliased ASimpleButton;
+    ReplaceLabel    : aliased AStaticLine;
+    ReplaceLine     : aliased AnEditLine;
+    DT : ADialogTaskRecord;
+    FindNotCancelled : boolean := true;
+    -- Text2Find is defined in encompasing procedure
+  begin
+    OpenWindow( To255( "Find/Replace Text" ), 10, 9, 70, 17, Normal );
+
+    Init( TextLine, 1, 2, 58, 2 );
+    SetText( TextLine, Text2Find );
+    AddControl( EditLine, TextLine'unchecked_access, false );
+
+    Init( ReplaceLabel, 1, 4, 9, 4 );
+    SetText( Replacelabel, To255( "Replace:" ) );
+    AddControl( StaticLine, ReplaceLabel'unchecked_access, false );
+
+    Init( ReplaceLine, 10, 4, 58, 4 );
+    SetText( ReplaceLine, Text2Replace );
+    AddControl( EditLine, ReplaceLine'unchecked_access, false );
+
+    Init( FindButton, 2, 6, 11, 6, s_Find_Hot );
+    SetText( FindButton, s_Find );
+    SetInstant( FindButton );
+    AddControl( SimpleButton, FindButton'unchecked_access, false );
+
+    Init( CancelButton, 17, 6, 26, 6, s_Cancel_Hot );
+    SetText( CancelButton, s_Cancel );
+    SetInstant( CancelButton );
+    AddControl( SimpleButton, CancelButton'unchecked_access, false );
+
+    Init( BackwardsButton, 31, 6, 40, 6, 'b' );
+    SetText( BackwardsButton, To255( "Back" ) );
+    SetCheck( BackwardsButton, FindBackwards );
+    AddControl( CheckBox, BackwardsButton'unchecked_access, false );
+
+    Init( ReplaceButton, 45, 6, 56, 6, 'r' );
+    SetText( ReplaceButton, To255( "Replace" ) );
+    SetInstant( ReplaceButton );
+    AddControl( SimpleButton, ReplaceButton'unchecked_access, false );
+
+    loop
+      DoDialog( DT );
+      case DT.control is
+      when 4 => Text2Find := GetText( TextLine );
+                Text2Replace := NullStr255;
+                FindBackwards := GetCheck( BackwardsButton );
+                Replacing := false;
+                exit;
+      when 5 => FindNotCancelled := false; -- find cancelled
+                Text2Find := NullStr255;
+                Text2Replace := NullStr255;
+                Replacing := false;
+                exit;
+      when 7 => Text2Find := GetText( TextLine );
+                Text2Replace := GetText( ReplaceLine );
+                FindBackwards := GetCheck( BackwardsButton );
+                Replacing := true;
+                exit;
+      when others => null;
+      end case;
+    end loop;
+    CloseWindow;
+    return FindNotCancelled;
+  end FindDialog;
+
+  procedure SaveSource( DoBackgroundUpdate : boolean := true;
+                        ForcePrompt : boolean := false ) is
+  -- save the current source file
+  --    DoBackgroundUpdate - if on, will quietly compile in
+  --                         background
+  --    ForcePrompt - to "save as" ... prompt for new filename
+     ProjectDir : str255;
+     TempHeader : str255list.list;
+     ssf        : ASelectSaveFileRec;
+  begin
+    TempHeader := GetList( SourceBox );
+    if Str255List.length( TempHeader ) = 0 then
+       if length( SourcePath ) > 0 then -- if untitled, don't bother
+          NoteAlert( "Blank source file not saved" );
+       end if;
+       SessionLog( "Blank source file not saved" );
+       return;
+    elsif length( SourcePath ) = 0 or ForcePrompt then
+        ProjectDir := GetPath;
+        ssf.Prompt := To255( "Save as ..." );
+        ssf.Default := To255( "untitled.adb" );
+        SelectSaveFile( ssf );
+        -- ssf changes current path, but we want to stick to the
+        -- project directory by default.  Get..Title will show
+        -- absolute path if source not in current (project) directory.
+        if ssf.replied then
+           SourcePath := ssf.path & "/" & ssf.fname;
+           SetPath( ProjectDir ); -- restore old path
+        end if;
+        if (not ssf.replied) or (length( SourcePath ) = 0) then
+           SessionLog( ssf.Prompt & " was cancelled" );
+           SetPath( ProjectDir ); -- restore old path
+           return;
+        end if;
+     end if;
+     --TempHeader := GetList( SourceBox );
+     SaveList( SourcePath, TempHeader );
+      if LastError = CoreOK then
+         SessionLog( "Saved as " & SourcePath );
+      else
+        SessionLog( "SaveSource: Error saving file", LastError );
+        StopAlert( "Error saving file: # " & AnErrorCode'image(
+          LastError ) );
+      end if;
+      if DoBackgroundUpdate then
+         BackgroundUpdate( SourcePath );
+      end if;
+pragma Debug( SessionLog( "SaveSource: Before update source path is " & ToString( SourcePath ) ) );
+     UpdateQuickOpen( SourcePath,
+       GetCurrent( SourceBox ), GetPosition( SourceBox ) );
+pragma Debug( SessionLog( "SaveSource: After update source path is " & ToString( SourcePath ) ) );
+  end SaveSource;
+
+  procedure ShowLineStats is
+    StatsLine : Str255;
+    Alloc     : long_integer;
+  begin
+    Str255List.GetAllocation( alloc );
+    StatsLine := Str255List.AListIndex'image( GetCurrent( SourceBox ) ) &
+        To255( "/" & Str255List.AListIndex'image( GetLength( SourceBox ) ) &
+          " line(s)   " & Str255List.AListIndex'image(
+              GetLength( SourceBox ) / 66 ) &
+          " pages   " & long_integer'image( Alloc / 1024 ) &
+          " K used   " & long_integer'image( Freemem / 1024 / 1024 ) &
+          " Meg total free" );
+    SetInfoText( StatsLine );
+  end ShowLineStats;
+
+  procedure CheckSource is
+    -- check source for syntax errors
+    ErrFile : Str255;
+  begin
+    SaveSource( DoBackgroundUpdate => false );
+    MakeTempFileName( ErrFile ); 
+    -- NOTE: if I add C support, don't forget -Wall
+    --
+    -- ShellOut( "gcc -O -c -gnatc " & SourcePath & " 2> " & ErrFile );
+    -- gnatf is supposed to be faster than gcc -gnatc, according to manual
+    -- -x2 produces spurious warnings in packages, so it's now -x1
+    --ShellOut( "gnatf -f -E -x1 -o " & SourcePath & " 2> " & ErrFile );
+    -- gnatf not included in 3.11 beta
+    if Proj_Egcs then
+       ShellOut( "egcs -O -c -gnatc -gnatf " & SourcePath & " " &
+         Proj_MakeOptions & " 2> " & ErrFile );
+    else
+       ShellOut( "gcc -O -c -gnatc -gnatf " & SourcePath & " " &
+         Proj_MakeOptions & " 2> " & ErrFile );
+    end if;
+    ClearGnatErrors;
+    LoadList( ErrFile, GnatErrors );
+    Erase( ErrFile );
+    if Str255List.Length( GnatErrors ) > 0 then
+       ShowListInfo( "Gnat Errors", 0, 1, 78, 23, GnatErrors );
+    else
+       NoteAlert( "File is OK" );
+    end if;
+  end CheckSource;
+
+  procedure StubSource is
+    -- produce a new package body from a spec using gnatstub
+    NewPath : Str255;
+    SPLen   : natural;
+  begin
+    SPLen := length( SourcePath );
+    if Slice( SourcePath, SPLen-3, SPLen ) /= ".ads" then
+       CautionAlert( "You can only stub a package spec" );
+       SessionLog( "You can only stub a package spec" );
+       return;
+    end if;
+    NewPath := To255( Slice( SourcePath, 1, SPLen-4 ) & ".adb" );
+    if IsFile( NewPath ) then
+       if NoAlert( "Overwrite existing package body?", Warning ) then
+          SessionLog( "User decided not to overwrite body with stub" );
+          return;
+       end if;
+       SaveSource( DoBackgroundUpdate => false );
+       SessionLog( "Stubbing " & SourcePath );
+       if not UNIX( "gnatstub " & SourcePath ) then
+          StopAlert( "gnatstub reported problems" );
+          SessionLog( "gnatstub reported problems" );
+       end if;
+    end if;  
+  end StubSource;
+
+  procedure XrefSource is
+     -- this should really use a radio list and allow goto
+     TempPath  : Str255;
+     TempList  : Str255List.List;
+     --RadioList : Str255List.List;
+     Filename  : Str255;
+  begin
+     SessionLog( "XrefSource: crossreferencing " & SourcePath );
+     SplitPath( SourcePath, TempPath, Filename );
+     if length( Filename ) = 0 and length( TempPath ) = 0 then
+        Filename := SourcePath; -- kludge
+     elsif length( Filename ) = 0 then
+        Filename := TempPath;
+     end if;
+     MakeTempFileName( TempPath );
+     SaveSource( DoBackgroundUpdate => false );
+     SetInfoText( "Crossreferencing..." );
+     UNIX( "gnatxref -v " & SourcePath &
+           " | grep " & Filename &
+           " | sort > " & TempPath );
+     SetInfoText( "Sorting..." );
+     LoadList( TempPath, TempList );
+     Erase( TempPath );
+     ShowListInfo( "Crossrefences", 0, 1, DisplayInfo.H_Res-1,
+       DisplayInfo.V_Res-1, TempList );
+     SetInfoText( "" );
+     Str255List.Clear( TempList );
+  end XrefSource;
+
+  procedure OptionsWindow is
+    QuietBox  : aliased ACheckBox;     -- 1
+    OKButton  : aliased ASimpleButton; -- 2
+
+    DT : ADialogTaskRecord;
+  begin
+    OpenWindow( To255( "Options" ), 1, 4, 78, 23, Normal );
+
+    Init( QuietBox, 42, 15, 61, 15, 'q' );
+    SetText( QuietBox, To255( "Quiet Updates" ) );
+    AddControl( CheckBox, QuietBox'unchecked_access, false );
+
+    Init( OKButton, 35, 17, 50, 17, 'o' );
+    SetText( OKButton, To255( "OK" ) );
+    AddControl( SimpleButton, OKButton'unchecked_access, false );
+
+    SetCheck( QuietBox,  Opt_Quiet );
+
+    loop
+      DoDialog( DT );
+      case DT.control is
+      when 2 => exit;
+      when others => null;
+      end case;
+    end loop;
+    Opt_Quiet := GetCheck( QuietBox );
+    CloseWindow;
+  end OptionsWindow;
+
+  procedure ProjectParams is
+  -- edit project parameters
+
+    MakeLabel : aliased AStaticLine;   -- 1
+    MakeLine  : aliased AnEditLine;    -- 2
+    LinkLabel : aliased AStaticLine;   -- 3
+    LinkLine  : aliased AnEditLine;    -- 4
+    MainLabel : aliased AStaticLine;   -- 5
+    MainLine  : aliased AnEditLine;    -- 6
+    OptLabel  : aliased AStaticLine;   -- 7
+    OptBox1   : aliased ARadioButton;  -- 8
+    OptBox2   : aliased ARadioButton;  -- 9
+    OptBox3   : aliased ARadioButton;  -- 10
+    OptBox4   : aliased ARadioButton;  -- 11
+    CPULabel  : aliased AStaticLine;   -- 12
+    CPUBox1   : aliased ARadioButton;  -- 13
+    CPUBox2   : aliased ARadioButton;  -- 14
+    CPUBox3   : aliased ARadioButton;  -- 15
+    CPUBox4   : aliased ARadioButton;  -- 16
+    DebugLabel: aliased AStaticLine;   -- 17
+    DebugBox1 : aliased ARadioButton;  -- 18
+    DebugBox2 : aliased ARadioButton;  -- 19
+    DebugBox3 : aliased ARadioButton;  -- 20
+    KindLabel : aliased AStaticLine;   -- 21
+    KindBox1  : aliased ARadioButton;  -- 22
+    KindBox2  : aliased ARadioButton;  -- 23
+    KindBox3  : aliased ARadioButton;  -- 24
+    KindBox4  : aliased ARadioButton;  -- 25
+    BuildLabel: aliased AStaticLine;   -- 26
+    BuildBox1 : aliased ARadioButton;  -- 27
+    BuildBox2 : aliased ARadioButton;  -- 28
+    BuildBox3 : aliased ARadioButton;  -- 29
+
+    StaticBox : aliased ACheckBox;     -- 30
+    EgcsBox   : aliased ACheckBox;     -- 31
+    QuietBox  : aliased ACheckBox;     -- 32
+
+    OKButton  : aliased ASimpleButton; -- 33
+
+    DT : ADialogTaskRecord;
+
+  begin
+    OpenWindow( To255( "Project Parameters" ), 1, 4, 78, 23, Normal );
+
+    Init( MakeLabel, 1, 2, 10, 2 );
+    SetText( MakeLabel, To255( "Compiling:" ) );
+    SetStyle( MakeLabel, Bold );
+    SetColour( MakeLabel, Yellow );
+    AddControl( StaticLine, MakeLabel'unchecked_access, false );
+
+    Init( MakeLine, 11, 2, 75, 2 );
+    SetText( MakeLine, Proj_MakeOptions );
+    AddControl( EditLine, MakeLine'unchecked_access, false );
+
+    Init( LinkLabel, 1, 4, 10, 4 );
+    SetText( LinkLabel, To255( "Linking:" ) );
+    SetStyle( LinkLabel, Bold );
+    SetColour( LinkLabel, Yellow );
+    AddControl( StaticLine, LinkLabel'unchecked_access, false );
+
+    Init( LinkLine, 11, 4, 75, 4 );
+    SetText( LinkLine, Proj_LinkOptions );
+    AddControl( EditLine, LinkLine'unchecked_access, false );
+
+    Init( MainLabel, 1, 6, 10, 6 );
+    SetText( MainLabel, To255( "Program:" ) );
+    SetStyle( MainLabel, Bold );
+    SetColour( MainLabel, Yellow );
+    AddControl( StaticLine, MainLabel'unchecked_access, false );
+
+    Init( MainLine, 11, 6, 75, 6 );
+    SetText( MainLine, Proj_Main );
+    AddControl( EditLine, MainLine'unchecked_access, false );
+
+    Init( OptLabel, 1, 8, 10, 8 );
+    SetText( OptLabel, To255( "Optimize:" ) );
+    SetStyle( OptLabel, Bold );
+    SetColour( OptLabel, Yellow );
+    AddControl( StaticLine, OptLabel'unchecked_access, false );
+
+    Init( OptBox1, 11, 8, 25, 8, 1 );
+    SetText( OptBox1, To255( "None" ) );
+    AddControl( RadioButton, OptBox1'unchecked_access, false );
+
+    Init( OptBox2, 26, 8, 41, 8, 1 );
+    SetText( OptBox2, To255( "Basic" ) );
+    AddControl( RadioButton, OptBox2'unchecked_access, false );
+
+    Init( OptBox3, 42, 8, 57, 8, 1 );
+    SetText( OptBox3, To255( "Size" ) );
+    AddControl( RadioButton, OptBox3'unchecked_access, false );
+
+    Init( OptBox4, 58, 8, 73, 8, 1 );
+    SetText( OptBox4, To255( "Speed" ) );
+    AddControl( RadioButton, OptBox4'unchecked_access, false );
+
+    Init( CPULabel, 1, 9, 10, 9 );
+    SetText( CPULabel, To255( "CPU:" ) );
+    SetStyle( CPULabel, Bold );
+    SetColour( CPULabel, Yellow );
+    AddControl( StaticLine, CPULabel'unchecked_access, false );
+
+    Init( CPUBox1, 11, 9, 25, 9, 2 );
+    SetText( CPUBox1, To255( "386" ) );
+    AddControl( RadioButton, CPUBox1'unchecked_access, false );
+
+    Init( CPUBox2, 26, 9, 41, 9, 2 );
+    SetText( CPUBox2, To255( "486" ) );
+    AddControl( RadioButton, CPUBox2'unchecked_access, false );
+
+    Init( CPUBox3, 42, 9, 57, 9, 2 );
+    SetText( CPUBox3, To255( "Pentium" ) );
+    AddControl( RadioButton, CPUBox3'unchecked_access, false );
+
+    Init( CPUBox4, 58, 9, 73, 9, 2 );
+    SetText( CPUBox4, To255( "Pentium II" ) );
+    AddControl( RadioButton, CPUBox4'unchecked_access, false );
+
+    Init( DebugLabel, 1, 10, 10, 10 );
+    SetText( DebugLabel, To255( "Debug:" ) );
+    SetStyle( DebugLabel, Bold );
+    SetColour( DebugLabel, Yellow );
+    AddControl( StaticLine, DebugLabel'unchecked_access, false );
+
+    Init( DebugBox1, 11, 10, 25, 10, 3 );
+    SetText( DebugBox1, To255( "Release" ) );
+    AddControl( RadioButton, DebugBox1'unchecked_access, false );
+
+    Init( DebugBox2, 26, 10, 41, 10, 3 );
+    SetText( DebugBox2, To255( "Alpha/Beta" ) );
+    AddControl( RadioButton, DebugBox2'unchecked_access, false );
+
+    Init( DebugBox3, 58, 10, 73, 10, 3 );
+    SetText( DebugBox3, To255( "Prerelease" ) );
+    AddControl( RadioButton, DebugBox3'unchecked_access, false );
+
+    Init( KindLabel, 1, 11, 10, 11 );
+    SetText( KindLabel, To255( "Kind:" ) );
+    SetStyle( KindLabel, Bold );
+    SetColour( KindLabel, Yellow );
+    AddControl( StaticLine, KindLabel'unchecked_access, false );
+
+    Init( KindBox1, 11, 11, 25, 11, 4 );
+    SetText( KindBox1, To255( "Program" ) );
+    AddControl( RadioButton, KindBox1'unchecked_access, false );
+
+    Init( KindBox2, 26, 11, 41, 11, 4 );
+    SetText( KindBox2, To255( "Package" ) );
+    AddControl( RadioButton, KindBox2'unchecked_access, false );
+
+    Init( KindBox3, 42, 11, 57, 11, 4 );
+    SetText( KindBox3, To255( "Static Lib" ) );
+    AddControl( RadioButton, KindBox3'unchecked_access, false );
+
+    Init( KindBox4, 58, 11, 73, 11, 4 );
+    SetText( KindBox4, To255( "Shared Lib" ) );
+    SetStatus( KindBox4, Off );
+    AddControl( RadioButton, KindBox4'unchecked_access, false );
+
+    Init( BuildLabel, 1, 12, 10, 12 );
+    SetText( BuildLabel, To255( "Builder:" ) );
+    SetStyle( BuildLabel, Bold );
+    SetColour( BuildLabel, Yellow );
+    AddControl( StaticLine, BuildLabel'unchecked_access, false );
+
+    Init( BuildBox1, 11, 12, 25, 12, 5 );
+    SetText( BuildBox1, To255( "Gnatmake" ) );
+    AddControl( RadioButton, BuildBox1'unchecked_access, false );
+
+    Init( BuildBox2, 26, 12, 41, 12, 5 );
+    SetText( BuildBox2, To255( "Make" ) );
+    AddControl( RadioButton, BuildBox2'unchecked_access, false );
+
+    Init( BuildBox3, 42, 12, 57, 12, 5 );
+    SetText( BuildBox3, To255( "Cook" ) );
+    AddControl( RadioButton, BuildBox3'unchecked_access, false );
+
+    Init( StaticBox, 1, 15, 21, 15, 's' );
+    SetText( StaticBox, To255( "Static Linking" ) );
+    AddControl( CheckBox, StaticBox'unchecked_access, false );
+
+    Init( EgcsBox, 22, 15, 41, 15, 'e' );
+    SetText( EgcsBox, To255( "Egcs compiler" ) );
+    AddControl( CheckBox, EgcsBox'unchecked_access, false );
+
+    Init( QuietBox, 42, 15, 61, 15, 'q' );
+    SetText( QuietBox, To255( "Quiet Updates" ) );
+    AddControl( CheckBox, QuietBox'unchecked_access, false );
+
+    Init( OKButton, 35, 17, 50, 17, 'o' );
+    SetText( OKButton, To255( "OK" ) );
+    AddControl( SimpleButton, OKButton'unchecked_access, false );
+
+    SetCheck( OptBox1, false );
+    SetCheck( OptBox2, false );
+    SetCheck( OptBox3, false );
+    SetCheck( OptBox4, false );
+    if Proj_Opt = 1 then
+       SetCheck( OptBox1, true );
+    elsif Proj_Opt = 2 then
+       SetCheck( OptBox2, true );
+    elsif Proj_Opt = 3 then
+       SetCheck( OptBox3, true );
+    else
+       SetCheck( OptBox4, true );
+    end if;
+
+    SetCheck( CPUBox1, false );
+    SetCheck( CPUBox2, false );
+    SetCheck( CPUBox3, false );
+    SetCheck( CPUBox4, false );
+    if Proj_CPU = 1 then
+       SetCheck( CPUBox1, true );
+    elsif Proj_CPU = 2 then
+       SetCheck( CPUBox2, true );
+    elsif Proj_CPU = 3 then
+       SetCheck( CPUBox3, true );
+    else
+       SetCheck( CPUBox4, true );
+    end if;
+
+    SetCheck( DebugBox1, false );
+    SetCheck( DebugBox2, false );
+    SetCheck( DebugBox3, false );
+    if Proj_Debug = 1 then
+       SetCheck( DebugBox1, true );
+    elsif Proj_Debug = 2 then
+       SetCheck( DebugBox2, true );
+    else
+       SetCheck( DebugBox3, true );
+    end if;
+
+    SetCheck( KindBox1, false );
+    SetCheck( KindBox2, false );
+    SetCheck( KindBox3, false );
+    SetCheck( KindBox4, false );
+    if Proj_Kind = 1 then
+       SetCheck( KindBox1, true );
+    elsif Proj_Kind = 2 then
+       SetCheck( KindBox2, true );
+    elsif Proj_Kind = 3 then
+       SetCheck( KindBox3, true );
+    else
+       SetCheck( KindBox4, true );
+    end if;
+
+    SetCheck( BuildBox1, false );
+    SetCheck( BuildBox2, false );
+    SetCheck( BuildBox3, false );
+    if Proj_Builder = 1 then
+       SetCheck( BuildBox1, true );
+    elsif Proj_Builder = 2 then
+       SetCheck( BuildBox2, true );
+    else
+       SetCheck( BuildBox3, true );
+    end if;
+
+    SetCheck( StaticBox, Proj_Static );
+    SetCheck( EgcsBox,   Proj_Egcs );
+    --SetCheck( QuietBox,  Proj_Quiet );
+    SetStatus( QuietBox, off );
+
+    loop
+      DoDialog( DT );
+      case DT.control is
+      when 33 => -- OK
+        if GetCheck( OptBox1 ) then
+           Proj_Opt := 1;
+        elsif GetCheck( OptBox2 ) then
+           Proj_Opt := 2;
+        elsif GetCheck( OptBox3 ) then
+           Proj_Opt := 3;
+        else
+           Proj_Opt := 4;
+        end if;
+
+        if GetCheck( CPUBox1 ) then
+           Proj_CPU := 1;
+        elsif GetCheck( CPUBox2 ) then
+           Proj_CPU := 2;
+        elsif GetCheck( CPUBox3 ) then
+           Proj_CPU := 3;
+        else
+           Proj_CPU := 4;
+        end if;
+
+        if GetCheck( DebugBox1 ) then
+           Proj_Debug := 1;
+        elsif GetCheck( DebugBox2 ) then
+           Proj_Debug := 2;
+        else
+           Proj_Debug := 3;
+        end if;
+
+        if GetCheck( KindBox1 ) then
+           Proj_Kind := 1;
+        elsif GetCheck( KindBox2 ) then
+           Proj_Kind := 2;
+        elsif GetCheck( KindBox3 ) then
+           Proj_Kind := 3;
+        else
+           Proj_Kind := 4;
+        end if;
+
+        if GetCheck( BuildBox1 ) then
+           Proj_Builder := 1;
+        elsif GetCheck( BuildBox2 ) then
+           Proj_Builder := 2;
+        else
+           Proj_Builder := 3;
+        end if;
+
+        Proj_MakeOptions := GetText( MakeLine );
+        Proj_LinkOptions := GetText( LinkLine );
+        Proj_Main        := GetText( MainLine );
+        Proj_Static      := GetCheck( StaticBox );
+        Proj_Egcs        := GetCheck( EgcsBox );
+        --Proj_Quiet       := GetCheck( QuietBox );
+        exit;
+      when others => null;
+      end case;
+    end loop;
+
+    CloseWindow;
+  end ProjectParams;
+
+  procedure GotoLine is
+    TextLine      : aliased ALongIntEditLine;
+    GotoButton    : aliased ASimpleButton;
+    CancelButton  : aliased ASimpleButton;
+    MarkButton    : aliased ASimpleButton;
+
+    DT : ADialogTaskRecord;
+
+    Line2Goto     : long_integer;
+  begin
+    OpenWindow( To255( "Goto" ), 10, 10, 70, 16, Normal );
+
+    Init( TextLine, 1, 2, 58, 2 );
+    SetText( TextLine, NullStr255 );
+    AddControl( LongIntEditLine, TextLine'unchecked_access, false );
+
+    Init( GotoButton, 2, 4, 11, 4, 'g' );
+    SetText( GotoButton, To255( "Goto" ) );
+    SetInstant( GotoButton );
+    AddControl( SimpleButton, GotoButton'unchecked_access, false );
+
+    Init( CancelButton, 22, 4, 31, 4, 'l' );
+    SetText( CancelButton, To255( "Cancel" ) );
+    SetInstant( CancelButton );
+    AddControl( SimpleButton, CancelButton'unchecked_access, false );
+
+    Init( MarkButton, 42, 4, 51, 4, 'm' );
+    SetText( MarkButton, To255( "Mark" ) );
+    SetInstant( MarkButton );
+    AddControl( SimpleButton, MarkButton'unchecked_access, false );
+
+    loop
+      DoDialog( DT );
+      case DT.control is
+      when 2 => Line2Goto := GetValue( TextLine );
+                if Line2Goto > 0 then
+                   if Line2Goto > GetLength( SourceBox ) then
+                      Line2Goto := GetLength( SourceBox );
+                   end if;
+                   MoveCursor( SourceBox, 0, 
+                     Line2Goto - GetCurrent( SourceBox ) );
+                end if;
+                exit;
+      when 3 => exit;
+      when 4 => Line2Goto := GetMark( SourceBox );
+                if Line2Goto > 0 then
+                   MoveCursor( SourceBox, 0, 
+                      Line2Goto - GetCurrent( SourceBox ) );
+                else
+                   NoteAlert( "No mark set" );
+                end if;
+                exit;
+      when others => null;
+      end case;
+    end loop;
+    CloseWindow;
+
+  end GotoLine;
+
+  procedure AboutProgram is
+    ch : character;
+  begin
+  OpenWindow( To255( "About TIA 0.9" ), 5, 5, 70, 18, Status, false );
+  MoveToGlobal( 6, 6 );
+  SetTextStyle( Title );
+  SetPenColour( White );
+  Draw( "Tiny IDE for Ada (TIA) 0.9" );
+  MoveToGlobal( 6, 7 );
+  SetPenColour( Red );
+  Draw( "Tiny IDE for Ada (TIA) 0.9" );
+  MoveToGlobal( 6, 8 );
+  SetTextStyle( Normal );
+  Draw( "Tiny IDE for Ada (TIA) 0.9" );
+
+  SetTextStyle( Normal );
+  SetPenColour( White );
+  MoveToGlobal( 6, 10 );
+  Draw( "The 48 hour IDE." );
+  MoveToGlobal( 6, 11 );
+  Draw( "For internal use only." );
+  MoveToGlobal( 6, 13 );
+  Draw( "Copyright (c) 1998, 1999 PegaSoft Canada." );
+  MoveToGlobal( 6, 14 );
+  Draw( "Read accompanying documentation for more information" );
+  MoveToGlobal( 6, 15 );
+  Draw( "or visit our web site at http://www.vaxxine.com/pegasoft." );
+
+  SetPenColour( White );
+  MoveToGlobal( 6, 17 );
+  Draw( "Press any key to continue" );
+  GetKey( ch );
+  CloseWindow;
+  end AboutProgram;
+
+  procedure BuildProject is
+    CompileLine : Str255;
+    LinkLine    : Str255;
+    ShellLine   : Str255;
+    ErrFile     : Str255;
+    LinkErrFile : Str255;
+    ScriptFile  : Str255;
+    Script      : Str255List.List;
+    LinkErrs    : Str255List.List;
+  begin
+    --if YesAlert( "Save source before building?", status ) then
+    SaveSource( DoBackgroundUpdate => false );
+    if IsBackgroundUpdate then
+       SetInfoText( "Waiting for background update to finish..." );
+       while IsBackgroundUpdate loop
+           Wait( 1.0 );
+       end loop;
+    end if;
+    SetInfoText( "" );
+    --end if;
+    --
+    -- these aren't finished
+    --
+    if Proj_Builder = 2 then -- make
+       UNIX( "make" );
+       ClearGnatErrors;
+    elsif Proj_Builder = 3 then -- cook
+       UNIX( "cook" );
+       ClearGnatErrors;
+    end if;
+    -- Proj_Build = 1 -- gnatmake
+    MakeTempFileName( ScriptFile ); 
+    ErrFile := ScriptFile & "_ce";
+    LinkErrFile := ScriptFile & "_be";
+    Str255List.Queue( Script, To255( "#!/bin/sh" ) );
+    Str255List.Queue( Script, To255( "#automatically created by TIA" ) );
+    Str255List.Queue( Script, To255( "echo" ) );
+    Str255List.Queue( Script, To255( "echo building project..." ) );
+    CompileLine := To255( "gnatmake -c -i -q " );
+    -- c = don't link and bind because we'll do that separately
+    -- i = save files in the same directory where you found source
+    -- q = quiet - don't list units as you compile them
+    if Proj_Opt = 1 then
+       null; -- nothing special for no optimize
+    elsif Proj_Opt = 2 then
+       CompileLine := CompileLine & "-O ";
+    elsif Proj_Opt = 3 then
+       CompileLine := CompileLine & "-O2 ";
+    else
+       CompileLine := CompileLine & "-O3 ";
+    end if;
+    -- egcs will use different options
+    if Proj_CPU = 1 then
+       CompileLine := CompileLine & "-mno-486 ";
+    elsif Proj_CPU = 2 then
+       CompileLine := CompileLine & "-m486 ";
+    else -- Pentium or P2
+       CompileLine := CompileLine & "-m486 -malign-loops=2 -malign-jumps=2"
+         & " -malign-functions=2 -fno-strength-reduce ";
+    end if;
+    -- debug
+    -- gnat 3.11 -gnatwu omitted for rebuild
+    if Proj_Debug = 1 then
+       CompileLine := CompileLine & "-gnatp ";
+    elsif Proj_Debug = 2 then
+       CompileLine := CompileLine & "-gnata -gnatf ";
+    elsif Proj_Debug = 3 then
+       CompileLine := CompileLine & "-gnata -gnato -gnatE -gnatf ";
+    end if;
+    if Proj_Kind = 4 then -- shared library
+       CompileLine := CompileLine & "-fPIC -shared ";
+    end if;
+    CompileLine := CompileLine & Proj_MakeOptions & " ";
+    -- and put in main program
+    CompileLine := CompileLine & Proj_Main & ".adb ";
+    Str255List.Queue( Script, "echo '" & CompileLine & "'" );
+    CompileLine := CompileLine & "2> " & ErrFile;
+    Str255List.Queue( Script, CompileLine );
+    Str255List.Queue( Script, To255( "if [ $? -ne 0 ] ; then" ) );
+    Str255List.Queue( Script, To255( "   exit 1" ) );
+    Str255List.Queue( Script, To255( "fi;" ) );
+    -- bind and link (if application)
+    if Proj_Kind = 1 then
+       Str255List.Queue( Script, To255( "echo binding project..." ) );
+       Str255List.Queue( Script, "gnatbind -xf " &
+         Proj_MakeOptions & " " &
+         Proj_Main  & ".ali 2> " & LinkErrFile );
+       Str255List.Queue( Script, To255( "if [ $? -ne 0 ] ; then" ) );
+       Str255List.Queue( Script, To255( "   exit 2" ) );
+       Str255List.Queue( Script, To255( "fi;" ) );
+       LinkLine := "gnatlink " & Proj_Main & ".ali " &
+         Proj_LinkOptions & " ";
+       if Proj_Static then
+          LinkLine := LinkLine & " -static ";
+       end if;
+       LinkLine := LinkLine & " 2> " & LinkErrFile;
+       Str255List.Queue( Script, To255( "echo linking project..." ) );
+       Str255List.Queue( Script, LinkLine );
+       Str255List.Queue( Script, To255( "if [ $? -ne 0 ] ; then" ) );
+       Str255List.Queue( Script, To255( "   exit 3" ) );
+       Str255List.Queue( Script, To255( "fi;" ) );
+    end if;
+    SaveList( ScriptFile, Script );
+    if LastError /= CoreOK then
+       SessionLog( "BuildProject: Error saving file", LastError );
+       StopAlert( "Error saving file: # " & AnErrorCode'image(
+          LastError ) );
+    end if;
+    ShellLine := "sh " & ScriptFile & " ; echo done";
+    ShellOut( ShellLine );
+    Erase( ScriptFile );
+    ClearGnatErrors;
+    LoadList( ErrFile, GnatErrors );
+    Erase( ErrFile );
+    LoadList( LinkErrFile, LinkErrs );
+    Erase( LinkErrFile );
+    Str255List.Clear( Script );
+    if Str255List.Length( GnatErrors ) > 0 then
+       ShowListInfo( "Gnat Errors", 0, 1, 78, 23, GnatErrors );
+    elsif Str255List.Length( LinkErrs ) > 0 then
+       ShowListInfo( "Bind and Link Errors", 0, 1, 78, 23, LinkErrs );
+    elsif not NoAlert( "Ready.  Run exeuctable?", kind => success ) then
+       ShellOut( Proj_Main );
+    end if;
+    Str255List.Clear( LinkErrs );
+  end BuildProject;
+
+  procedure OpenSource is
+
+    procedure BrowseOpenSource( NewFilename : out str255 ) is
+      ProjectDir : str255;
+      sof : ASelectOpenFileRec;
+    begin
+      ProjectDir := GetPath;
+      sof.prompt := To255( "Open which source file?" );
+      sof.direct := false;
+      sof.suffix := NullStr255;
+      SelectOpenFile( sof );
+      if sof.replied then
+         NewFilename := sof.path & "/" & sof.fname;
+      else
+         NewFilename := NullStr255;
+      end if;
+      -- sof may change path but we want to stay in project directory
+      SetPath( ProjectDir );
+    end BrowseOpenSource;
+
+    TextLine     : aliased AnEditLine;
+    NewButton    : aliased ASimpleButton;
+    OpenButton   : aliased ASimpleButton;
+    CancelButton : aliased ASimpleButton;
+    BrowseButton : aliased ASimpleButton;
+    OneButton    : aliased ASimpleButton;
+    TwoButton    : aliased ASimpleButton;
+    ThreeButton  : aliased ASimpleButton;
+    FourButton   : aliased ASimpleButton;
+    NewFilename  : str255;
+
+    DT : ADialogTaskRecord;
+
+    procedure SwitchToNewFile is
+    -- procedure SwitchToNewFile( path : str255 ) is
+    -- was path, but gnat was screwing up local variable
+    -- so trying it with NewFilename directly
+    begin
+      SaveSource;
+      if IsFile( NewFilename ) then
+         SourcePath := NewFilename;
+         Str255List.Clear( SourceText );
+         LoadList( SourcePath, SourceText );
+         SetList( SourceBox, SourceText );
+         SetThumb( SourceBar, 1 );
+      else
+         StopAlert( ToString( NewFilename ) & " doesn't exist" );
+      end if;
+    end SwitchToNewFile;
+
+    procedure SwitchToNewFile( sr : ASourceReference ) is
+      TempSave : ASourceReference;
+      -- kludge: gnat 3.10 mangled sr during return from SaveSource call
+    begin
+      TempSave := sr;
+      SaveSource;
+      if IsFile( TempSave.path ) then
+         SourcePath := TempSave.path;
+         Str255List.Clear( SourceText );
+         LoadList( SourcePath, SourceText );
+         SetList( SourceBox, SourceText );
+         SetCursor( SourceBox, TempSave.Posn, TempSave.Line );
+         SetThumb( SourceBar, long_integer( TempSave.Posn ) );
+      else
+         StopAlert( ToString( SourcePath ) & " doesn't exist" );
+      end if;
+    end SwitchToNewFile;
+
+  begin
+
+    OpenWindow( To255( "Open/New Source" ), 10, 6, 70, 18, Normal, true );
+
+    Init( TextLine, 1, 2, 58, 2 );
+    SetText( TextLine, NullStr255 );
+    SetInfo( TextLine, To255( "Path of file to load" ) );
+    AddControl( LongIntEditLine, TextLine'unchecked_access, false );
+
+    Init( OpenButton, 2, 4, 13, 4, 'o' );
+    SetText( OpenButton, "Open" );
+    SetInfo( OpenButton, To255( "Open file you named" ) );
+    SetInstant( OpenButton );
+    AddControl( SimpleButton, OpenButton'unchecked_access, false );
+
+    Init( CancelButton, 14, 4, 25, 4, 'l' );
+    SetText( CancelButton, "Cancel" );
+    SetInfo( CancelButton, To255( "Cancel" ) );
+    SetInstant( CancelButton );
+    AddControl( SimpleButton, CancelButton'unchecked_access, false );
+
+    Init( BrowseButton, 26, 4, 41, 4, 'b' );
+    SetText( BrowseButton, "Browse..." );
+    SetInfo( BrowseButton, To255( "Look for the file to open" ) );
+    SetInstant( BrowseButton );
+    AddControl( SimpleButton, BrowseButton'unchecked_access, false );
+
+    Init( NewButton, 41, 4, 52, 4, 'n' );
+    SetText( NewButton, "New" );
+    SetInfo( NewButton, To255( "Start a new file" ) );
+    SetInstant( NewButton );
+    AddControl( SimpleButton, NewButton'unchecked_access, false );
+
+    Init( OneButton, 1, 6, 58, 6, '1' );
+    SetText( OneButton, "1 " & QuickOpen1.path );
+    SetInfo( OneButton, To255( "Open this file" ) );
+    SetInstant( OneButton );
+    if length( QuickOpen1.path ) = 0 then
+       SetStatus( OneButton, off );
+       SetText( OneButton, "1 - " );
+    end if;
+    AddControl( SimpleButton, OneButton'unchecked_access, false );
+
+    Init( TwoButton, 1, 7, 58, 7, '2' );
+    SetText( TwoButton, "2 " & QuickOpen2.path );
+    SetInfo( TwoButton, To255( "Open this file" ) );
+    SetInstant( TwoButton );
+    if length( QuickOpen2.path ) = 0 then
+       SetStatus( TwoButton, off );
+       SetText( TwoButton, "2 - " );
+    end if;
+    AddControl( SimpleButton, TwoButton'unchecked_access, false );
+
+    Init( ThreeButton, 1, 8, 58, 8, '3' );
+    SetText( ThreeButton, "3 " & QuickOpen3.path );
+    SetInfo( ThreeButton, To255( "Open this file" ) );
+    SetInstant( ThreeButton );
+    if length( QuickOpen3.path ) = 0 then
+       SetText( ThreeButton, "3 - " );
+       SetStatus( ThreeButton, off );
+    end if;
+    AddControl( SimpleButton, ThreeButton'unchecked_access, false );
+
+    Init( FourButton, 1, 9, 58, 9, '4' );
+    SetText( FourButton, "4 " & QuickOpen4.path );
+    SetInfo( FourButton, To255( "Open this file" ) );
+    SetInstant( FourButton );
+    if length( QuickOpen4.path ) = 0 then
+       SetText( FourButton, "4 - " );
+       SetStatus( FourButton, off );
+    end if;
+    AddControl( SimpleButton, FourButton'unchecked_access, false );
+
+    loop
+      DoDialog( DT );
+      case DT.control is
+      when 2 => NewFilename := GetText( TextLine );
+                if Index( NewFilename, "." ) = 0 then
+                   NewFilename := NewFilename & ".adb";
+                end if;
+                SwitchToNewFile;
+                exit;
+      when 3 => exit; -- Cancel
+      when 4 => BrowseOpenSource( NewFilename );
+                if length( NewFilename ) > 0 then
+                   SwitchToNewFile;
+                end if;
+                exit;
+      when 5 => SaveSource;
+                SourcePath := NullStr255;
+                SetList( SourceBox, SourceText );
+                exit;
+      when 6 => SwitchToNewFile( QuickOpen1 );
+                exit;
+      when 7 => SwitchToNewFile( QuickOpen2 );
+                exit;
+      when 8 => SwitchToNewFile( QuickOpen3 );
+                exit;
+      when 9 => SwitchToNewFile( QuickOpen4 );
+                exit;
+      when others=> null;
+      end case;
+    end loop;
+    CloseWindow;
+    SetWindowTitle( GetWindowTitleFromPath( SourcePath ) );
+    DrawWindow( Frame );
+  end OpenSource;
+
+  procedure RevertSource is
+  begin
+    if IsFile( SourcePath ) then
+       Str255List.Clear( SourceText );
+       LoadList( SourcePath, SourceText );
+       SetList( SourceBox, SourceText );
+       SetThumb( SourceBar, 1 );
+    else
+       StopAlert( ToString( SourcePath ) & " doesn't exist" );
+    end if;
+    SetInfoText( "Reverted to last saved " & SourcePath );
+  end RevertSource;
+
+  procedure GotoNextError is
+    PrefixStr  : Str255;
+    TempStr    : Str255;
+    File2Load  : Str255;
+    ColonCount : integer := 0;
+    WillBeLastColon : integer := 1;
+    LastColon  : integer := 1;
+    LineNum    : integer;
+    LinePos    : integer;
+    LineNormal : boolean := false; -- if normal error line
+  begin
+    if Str255List.Length( GnatErrors ) = 0 then
+       NoteAlert( "There were no errors" );
+    else
+      if NextGnatError > Str255List.Length( GnatErrors ) then
+         NextGnatError := 1;
+      end if;
+      Str255List.Find( GnatErrors, NextGnatError, TempStr );
+      PrefixStr := (long_integer'image( NextGnatError ) & "/" ) &
+                 To255( long_integer'image( Str255List.Length( GnatErrors ) ) &
+                 ": " );
+      for i in 1..Length( TempStr ) loop
+          if Element( TempStr, i ) = ':' then
+             ColonCount := ColonCount + 1;
+             LastColon := WillBeLastColon;
+             WillBeLastColon := i;
+             if ColonCount = 1 and i > 1 then -- filename
+                File2Load := To255( Slice( TempStr, 1, i-1 ) );
+             elsif ColonCount = 2 then -- position
+                LineNum := ToInteger(
+                  Slice( TempStr, LastColon + 1, i - 1 ) ); 
+                if LineNum = 0 then
+                   exit;
+                 end if;
+             elsif ColonCount = 3 then -- position
+                LinePos := ToInteger(
+                  Slice( TempStr, LastColon + 1, i - 1 ) ); 
+                LineNormal := true;
+                exit;
+             end if;
+          end if;
+      end loop;
+      if LineNormal and SourcePath /= File2Load then
+         if YesAlert( ToString( "Load " & File2Load & "?" ), status ) then
+            SaveSource;
+            SourcePath := File2Load;
+            SetWindowTitle( GetWindowTitleFromPath( SourcePath ) );
+            Str255List.Clear( SourceText );
+            LoadList( SourcePath, SourceText );
+            SetList( SourceBox, SourceText );
+            Str255List.Clear( SourceText );
+         else
+            LineNormal := false;
+         end if;
+      end if;
+      if LineNormal then
+         MoveCursor( SourceBox, -256, long_integer( LineNum ) - GetCurrent( SourceBox ) );
+         MoveCursor( SourceBox, LinePos-1, 0 );
+         SetInfoText( PrefixStr &
+            Slice( TempStr, WillBeLastColon+1, length( TempStr ) ) );
+      else -- unexpected error line?
+         SetInfoText( PrefixStr & TempStr );
+      end if;
+    end if;
+    NextGnatError := NextGnatError + 1;
+  end GotoNextError;
+
+procedure FileMenu is
+
+  NewButton    : aliased ASimpleButton;
+  OpenButton   : aliased ASimpleButton;
+  SaveButton   : aliased ASimpleButton;
+  SaveAsButton : aliased ASimpleButton;
+  RevertButton : aliased ASimpleButton;
+  StatsButton  : aliased ASimpleButton;
+  StubButton   : aliased ASimpleButton;
+  CheckButton  : aliased ASimpleButton;
+  XrefButton   : aliased ASimpleButton;
+  QuitButton   : aliased ASimpleButton;
+  CancelButton : aliased ASimpleButton;
+
+  HBar1        : aliased AnHorizontalSep;
+  HBar2        : aliased AnHorizontalSep;
+  HBar3        : aliased AnHorizontalSep;
+
+  DT : ADialogTaskRecord;
+
+begin
+  OpenWindow( To255( "File Menu" ), 5, DisplayInfo.V_Res-18, 30,
+    DisplayInfo.V_Res-3, Normal );
+
+  Init( NewButton, 1, 1, 25, 1, 'n' );
+  SetInstant( NewButton );
+  SetText( NewButton, "New Source" );
+  AddControl( SimpleButton, NewButton'unchecked_access, false );
+
+  Init( OpenButton, 1, 2, 25, 2, 'o' );
+  SetInstant( OpenButton );
+  SetText( OpenButton, "Open Source..." );
+  AddControl( SimpleButton, OpenButton'unchecked_access, false );
+
+  Init( SaveButton, 1, 4, 25, 4, 's' );
+  SetInstant( SaveButton );
+  SetText( SaveButton, "Save" );
+  AddControl( SimpleButton, SaveButton'unchecked_access, false );
+
+  Init( SaveAsButton, 1, 5, 25, 5, '!' );
+  SetInstant( SaveAsButton );
+  SetText( SaveAsButton, "Save As ... (!)" );
+  AddControl( SimpleButton, SaveAsButton'unchecked_access, false );
+
+  Init( RevertButton, 1, 6, 25, 6, '*' );
+  SetInstant( RevertButton );
+  SetText( RevertButton, "Revert (*)" );
+  AddControl( SimpleButton, RevertButton'unchecked_access, false );
+
+  Init( StatsButton, 1, 8, 25, 8, 't' );
+  SetInstant( StatsButton );
+  SetText( StatsButton, "Stats" );
+  AddControl( SimpleButton, StatsButton'unchecked_access, false );
+
+  Init( StubButton, 1, 9, 25, 9, 'b' );
+  SetInstant( StubButton );
+  SetText( StubButton, "Stub" );
+  AddControl( SimpleButton, StubButton'unchecked_access, false );
+
+  Init( CheckButton, 1, 10, 25, 10, 'k' );
+  SetInstant( CheckButton );
+  SetText( CheckButton, "Check" );
+  AddControl( SimpleButton, CheckButton'unchecked_access, false );
+
+  Init( XrefButton, 1, 11, 25, 11, 'x' );
+  SetInstant( XrefButton );
+  SetText( XrefButton, "Xref" );
+  AddControl( SimpleButton, XrefButton'unchecked_access, false );
+
+  Init( QuitButton, 1, 13, 25, 13, 'q' );
+  SetInstant( QuitButton );
+  SetText( QuitButton, "Quit" );
+  AddControl( SimpleButton, QuitButton'unchecked_access, false );
+
+  Init( CancelButton, 1, 14, 25, 14, 'l' );
+  SetInstant( CancelButton );
+  SetText( CancelButton, "Cancel" );
+  AddControl( SimpleButton, CancelButton'unchecked_access, false );
+
+  Init( HBar1, 1, 3, 25, 3 );
+  AddControl( HorizontalSep, HBar1'unchecked_access, false );
+
+  Init( HBar2, 1, 7, 25, 7 );
+  AddControl( HorizontalSep, HBar2'unchecked_access, false );
+
+  Init( HBar3, 1, 12, 25, 12 );
+  AddControl( HorizontalSep, HBar3'unchecked_access, false );
+
+  DoDialog( DT, HearInCB => MenuInputCB );
+  CloseWindow;
+  case DT.Control is
+  when 1 => NewSource;
+            SetList( SourceBox, SourceText );
+            Str255List.Clear( SourceText );
+  when 2 => OpenSource;
+  when 3 => SaveSource;
+  when 4 => SaveSource( ForcePrompt => true );
+  when 5 => RevertSource;
+  when 6 => ShowLineStats;
+  when 7 => StubSource;
+  when 8 => CheckSource;
+  when 9 => XrefSource;
+  when 10 => declare
+              Response : AControlNumber;
+            begin
+              if length( SourcePath ) = 0 then
+                 SaveSource;
+              else
+                 Response := YesCancelAlert( "Save changes to "
+                   & ToString( GetWindowTitleFromPath( SourcePath ) )
+                   & "?", status );
+                 if Response = 1 then
+                    SaveSource( DoBackgroundUpdate => false );
+                 end if;
+              end if;
+              if Response < 3 then
+                 Done := true;
+              end if;
+            end;
+  when others => null;
+  end case;
+end FileMenu;
+
+procedure EditMenu is
+  CopyButton   : aliased ASimpleButton;
+  CutButton    : aliased ASimpleButton;
+  ClearButton  : aliased ASimpleButton;
+  PasteButton  : aliased ASimpleButton;
+  HBar         : aliased AnHorizontalSep;
+  MarkButton   : aliased ASimpleButton;
+  ClearMarkButton : aliased ASimpleButton;
+  HBar2        : aliased AnHorizontalSep;
+  GotoButton   : aliased ASimpleButton;
+  AppendButton : aliased ASimpleButton;
+  HBar3        : aliased AnHorizontalSep;
+  CancelButton : aliased ASimpleButton;
+
+  DT : ADialogTaskRecord;
+
+  s : string(1..1);
+
+begin
+  OpenWindow( To255( "Edit Menu" ), 15, DisplayInfo.V_Res-16, 55,
+    DisplayInfo.V_Res-3, Normal );
+
+  Init( CopyButton, 1, 1, 58, 1, 'c' );
+  SetText( CopyButton, "Copy (Control-B)" );
+  SetInstant( CopyButton );
+  AddControl( SimpleButton, CopyButton'unchecked_access, false );
+
+  Init( CutButton, 1, 2, 58, 2, 'u' );
+  SetText( CutButton, "Cut (Control-B + Control-X)" );
+  SetInstant( CutButton );
+  AddControl( SimpleButton, CutButton'unchecked_access, false );
+
+  Init( ClearButton, 1, 3, 58, 3, 'x' );
+  SetText( ClearButton, "Clear (Control-X)" );
+  SetInstant( ClearButton );
+  AddControl( SimpleButton, ClearButton'unchecked_access, false );
+
+  Init( PasteButton, 1, 4, 58, 4, 'p' );
+  SetText( PasteButton, "Paste (Control-V)" );
+  SetInstant( PasteButton );
+  AddControl( SimpleButton, PasteButton'unchecked_access, false );
+
+  Init( HBar, 1, 5, 58, 5 );
+  AddControl( HorizontalSep, HBar'unchecked_access, false );
+
+  Init( MarkButton, 1, 6, 58, 6, 'm' );
+  SetText( MarkButton, "Mark (Control-6)" );
+  SetInstant( MarkButton );
+  AddControl( SimpleButton, MarkButton'unchecked_access, false );
+
+  Init( ClearMarkButton, 1, 7, 58, 7, 'k' );
+  SetText( ClearMarkButton, "Clear Mark" );
+  SetInstant( ClearMarkButton );
+  AddControl( SimpleButton, ClearMarkButton'unchecked_access, false );
+
+  Init( HBar2, 1, 8, 58, 8 );
+  AddControl( HorizontalSep, HBar2'unchecked_access, false );
+
+  Init( AppendButton, 1, 10, 58, 10, 'a' );
+  SetText( AppendButton, "Append" );
+  SetInstant( AppendButton );
+  AddControl( SimpleButton, AppendButton'unchecked_access, false );
+
+  Init( GotoButton, 1, 9, 58, 9, 'g' );
+  SetText( GotoButton, "Goto" );
+  SetInstant( GotoButton ); -- duplicate button with Find.
+  AddControl( SimpleButton, GotoButton'unchecked_access, false );
+
+  Init( HBar3, 1, 11, 58, 11 );
+  AddControl( HorizontalSep, HBar3'unchecked_access, false );
+
+  Init( CancelButton, 1, 12, 58, 12, 'l' );
+  SetText( CancelButton, "Cancel" );
+  SetInstant( CancelButton );
+  AddControl( SimpleButton, CancelButton'unchecked_access, false );
+
+  DoDialog( DT, HearInCB => MenuInputCB );
+  CloseWindow; -- close window resets userio losing keys
+  case DT.Control is
+  when 1 => s(1) := CopyKey;
+            SetInputString( To255( s ) );
+  when 2 => s(1) := CopyKey;
+            SetInputString( To255( s ) );
+            s(1) := ClearKey;
+            SetInputString( To255( s ) );
+  when 3 => s(1) := ClearKey;
+            SetInputString( To255( s ) );
+  when 4 => s(1) := PasteKey;
+            SetInputString( To255( s ) );
+  when 6 => s(1) := MarkKey;
+            SetInputString( To255( s ) );
+  when 7 => SetMark( SourceBox, -1 );
+  when 9 => MoveCursor( SourceBox, 256, 0 ); -- append
+  when 10 => GotoLine;
+  when others => null; -- cancel
+  end case;
+end EditMenu;
+
+procedure FindMenu is
+
+  FindButton   : aliased ASimpleButton;
+  NextButton   : aliased ASimpleButton;
+  ErrButton    : aliased ASimpleButton;
+  GotoButton   : aliased ASimpleButton;
+  CancelButton : aliased ASimpleButton;
+
+  HBar1        : aliased AnHorizontalSep;
+
+  DT : ADialogTaskRecord;
+
+  procedure FindOrReplace is
+    -- not finished yet
+    TempHeader : Str255List.List;
+    ThisLine   : Str255;
+    RepPos     : natural;
+  begin
+    FindText( SourceBox, Text2Find, FindBackwards );
+    SetThumb( SourceBar, GetCurrent( SourceBox ) );
+    if Replacing then
+       -- this is not 100% reliable; it should really be added
+       -- to controls.adb & enhanced
+       TempHeader := GetList( SourceBox );
+       Str255List.Find( TempHeader, GetCurrent( SourceBox ),
+          ThisLine );
+       RepPos := Index(ThisLine, ToString( Text2Find ) );
+       if RepPos > 0 then
+          Delete( ThisLine, RepPos, RepPos + Length( Text2Find ) - 1 );
+          Insert( ThisLine, RepPos, ToString( Text2Replace ) );
+       end if;
+    end if;
+  end FindOrReplace;
+
+begin
+  OpenWindow( To255( "Find Menu" ), 25, DisplayInfo.V_Res-10, 50,
+    DisplayInfo.V_Res-3, Normal );
+
+  Init( FindButton, 1, 1, 25, 1, 'y' );
+  SetInstant( FindButton );
+  SetText( FindButton, "Find/Replace (y)" );
+  AddControl( SimpleButton, FindButton'unchecked_access, false );
+
+  Init( NextButton, 1, 2, 25, 2, 'n' );
+  SetInstant( NextButton );
+  SetText( NextButton, "Next" );
+  AddControl( SimpleButton, NextButton'unchecked_access, false );
+
+  Init( ErrButton, 1, 3, 25, 3, 'x' );
+  SetInstant( ErrButton );
+  SetText( ErrButton, "Next Error" );
+  AddControl( SimpleButton, ErrButton'unchecked_access, false );
+
+  Init( GotoButton, 1, 4, 25, 4, 'g' );
+  SetInstant( GotoButton );
+  SetText( GotoButton, "Goto" );
+  AddControl( SimpleButton, GotoButton'unchecked_access, false );
+
+  Init( CancelButton, 1, 6, 25, 6, 'l' );
+  SetInstant( CancelButton );
+  SetText( CancelButton, "Cancel" );
+  AddControl( SimpleButton, CancelButton'unchecked_access, false );
+
+  Init( HBar1, 1, 5, 25, 5 );
+  AddControl( HorizontalSep, HBar1'unchecked_access, false );
+
+  if length( Text2Find ) > 0 then
+    SetStatus( NextButton, On );
+  else
+    SetStatus( NextButton, Off );
+  end if;
+
+  DoDialog( DT, HearInCB => MenuInputCB );
+  CloseWindow;
+
+  case DT.Control is
+  when 1 => if FindDialog then
+               if length( Text2Find ) > 0 then
+                  FindOrReplace;
+               else
+                  SetFindPhrase( SourceBox, NullStr255 );
+               end if;
+               FindOrReplace;
+            else
+               SetFindPhrase( SourceBox, NullStr255 );
+               SetStatus( NextButton, Off );
+            end if;
+  when 2 => FindOrReplace;
+            --FindText( SourceBox, Text2Find, FindBackwards );
+            --SetThumb( SourceBar, GetCurrent( SourceBox ) );
+  when 3 => GotoNextError;
+  when 4 => GotoLine;
+  when others => null;
+  end case;
+end FindMenu;
+
+procedure MiscMenu is
+
+  MacButton    : aliased ASimpleButton;
+  OptionButton  : aliased ASimpleButton;
+  ErrButton    : aliased ASimpleButton;
+  GotoButton   : aliased ASimpleButton;
+  CancelButton : aliased ASimpleButton;
+
+  HBar1        : aliased AnHorizontalSep;
+
+  DT : ADialogTaskRecord;
+
+begin
+  OpenWindow( To255( "Misc Menu" ), 35, DisplayInfo.V_Res-10, 60,
+    DisplayInfo.V_Res-3, Normal );
+
+  Init( MacButton, 1, 1, 25, 1, 'm' );
+  SetInstant( MacButton );
+  SetText( MacButton, "Edit Macros" );
+  AddControl( SimpleButton, MacButton'unchecked_access, false );
+
+  Init( OptionButton, 1, 2, 25, 2, 'o' );
+  SetInstant( OptionButton );
+  SetText( OptionButton, "Options" );
+  AddControl( SimpleButton, OptionButton'unchecked_access, false );
+
+  Init( ErrButton, 1, 3, 25, 3 );
+  SetInstant( ErrButton );
+  SetText( ErrButton, "---" );
+  AddControl( SimpleButton, ErrButton'unchecked_access, false );
+
+  Init( GotoButton, 1, 4, 25, 4 );
+  SetInstant( GotoButton );
+  SetText( GotoButton, "---" );
+  AddControl( SimpleButton, GotoButton'unchecked_access, false );
+
+  Init( CancelButton, 1, 6, 25, 6, 'l' );
+  SetInstant( CancelButton );
+  SetText( CancelButton, "Cancel" );
+  AddControl( SimpleButton, CancelButton'unchecked_access, false );
+
+  Init( HBar1, 1, 5, 25, 5 );
+  AddControl( HorizontalSep, HBar1'unchecked_access, false );
+
+  DoDialog( DT, HearInCB => MenuInputCB );
+  CloseWindow;
+
+  case DT.Control is
+  when 1 => EditMacros;
+  when 2 => OptionsWindow;
+  when others => null;
+  end case;
+end MiscMenu;
+
+procedure ProjectMenu is
+
+  ParamButton  : aliased ASimpleButton;
+  BuildButton  : aliased ASimpleButton;
+  PeopleButton : aliased ASimpleButton;
+  CancelButton : aliased ASimpleButton;
+
+  DT : ADialogTaskRecord;
+
+begin
+  OpenWindow( To255( "Project Menu" ), 40, DisplayInfo.V_Res-10, 65,
+    DisplayInfo.V_Res-3, Normal );
+
+  Init( ParamButton, 1, 1, 25, 1, 'p' );
+  SetInstant( ParamButton );
+  SetText( ParamButton, "Params" );
+  AddControl( SimpleButton, ParamButton'unchecked_access, false );
+
+  Init( BuildButton, 1, 2, 25, 2, 'b' );
+  SetInstant( BuildButton );
+  SetText( BuildButton, "Build" );
+  AddControl( SimpleButton, BuildButton'unchecked_access, false );
+
+  Init( PeopleButton, 1, 3, 25, 3, 'e' );
+  SetInstant( PeopleButton );
+  SetText( PeopleButton, "People" );
+  AddControl( SimpleButton, PeopleButton'unchecked_access, false );
+
+  Init( CancelButton, 1, 6, 25, 6, 'l' );
+  SetInstant( CancelButton );
+  SetText( CancelButton, "Cancel" );
+  AddControl( SimpleButton, CancelButton'unchecked_access, false );
+
+  DoDialog( DT, HearInCB => MenuInputCB );
+  CloseWindow;
+
+  case DT.Control is
+  when 1 => ProjectParams;
+  when 2 => BuildProject;
+  when 3 => null;
+  when others => null;
+  end case;
+end ProjectMenu;
+
+procedure Main is
+
+  FileButton : aliased ASimpleButton;
+  EditButton : aliased ASimpleButton;
+  FindButton : aliased ASimpleButton;
+  MiscButton : aliased ASimpleButton;
+  ProjButton : aliased ASimpleButton;
+  AboutButton: aliased ASimpleButton;
+  -- wide screen
+  QuickLabel : aliased AStaticLine;
+  OneButton  : aliased ASimpleButton;
+  TwoButton  : aliased ASimpleButton;
+  ThreeButton : aliased ASimpleButton;
+  FourButton : aliased ASimpleButton;
+  FiveButton : aliased ASimpleButton;
+  OtherButton: aliased ASimpleButton;
+
+  DT         : ADialogTaskRecord;
+
+  -- copy of routine from OpenSource
+  -- probably layout should be changed to avoid this
+
+    procedure SwitchToNewFile( sr : ASourceReference ) is
+      TempSave : ASourceReference;
+      -- kludge: gnat 3.10 mangled sr during return from SaveSource call
+    begin
+      TempSave := sr;
+      SaveSource;
+      if IsFile( TempSave.path ) then
+         SourcePath := TempSave.path;
+         Str255List.Clear( SourceText );
+         LoadList( SourcePath, SourceText );
+         SetList( SourceBox, SourceText );
+         SetCursor( SourceBox, TempSave.Posn, TempSave.Line );
+         SetThumb( SourceBar, long_integer( TempSave.Posn ) );
+      else
+         StopAlert( ToString( SourcePath ) & " doesn't exist" );
+      end if;
+    end SwitchToNewFile;
+
+begin
+  OpenWindow( GetWindowTitleFromPath( SourcePath ), 0, 0,
+     DisplayInfo.H_Res-1, DisplayInfo.V_Res-1, normal, true );
+
+  if DisplayInfo.H_Res > 90 then
+     Init( SourceBox, 1, 1, DisplayInfo.H_Res-23, DisplayInfo.V_Res-4 );
+     DefineAdaKeywords( SourceBox );
+     AddControl( SourceEditList, SourceBox'unchecked_access, true );
+
+     Init( SourceBar, DisplayInfo.H_Res-22, 1, DisplayInfo.H_Res-22,
+        DisplayInfo.V_Res-5 );
+     AddControl( ScrollBar, SourceBar'unchecked_access, IsGlobal => true );
+  else
+     Init( SourceBox, 1, 1, DisplayInfo.H_Res-3, DisplayInfo.V_Res-4 );
+     DefineAdaKeywords( SourceBox );
+     AddControl( SourceEditList, SourceBox'unchecked_access, true );
+
+     Init( SourceBar, DisplayInfo.H_Res-2, 1, DisplayInfo.H_Res-2,
+        DisplayInfo.V_Res-5 );
+     AddControl( ScrollBar, SourceBar'unchecked_access, IsGlobal => true );
+  end if;
+
+  Init( FileButton, 1, DisplayInfo.V_Res-3, 10, DisplayInfo.V_Res-3, 'f' );
+  SetText( FileButton, To255( "File" ) );
+  SetInfo( FileButton, To255( "File Menu" ) );
+  SetInstant( FileButton );
+  AddControl( SimpleButton, FileButton'unchecked_access, IsGlobal => true );
+  
+  Init( EditButton, 11, DisplayInfo.V_Res-3, 20, DisplayInfo.V_Res-3, 'e' );
+  SetText( EditButton, To255( "Edit" ) );
+  SetInfo( EditButton, To255( "Edit Menu" ) );
+  SetInstant( EditButton );
+  AddControl( SimpleButton, EditButton'unchecked_access, IsGlobal => true );
+  
+  Init( FindButton, 21, DisplayInfo.V_Res-3, 30, DisplayInfo.V_Res-3, 'i' );
+  SetText( FindButton, To255( "Find" ) );
+  SetInfo( FindButton, To255( "Find text" ) );
+  SetInstant( FindButton );
+  AddControl( SimpleButton, FindButton'unchecked_access, IsGlobal => true );
+  
+  Init( MiscButton, 31, DisplayInfo.V_Res-3, 40, DisplayInfo.V_Res-3, 'm' );
+  SetText( MiscButton, To255( "Misc" ) );
+  SetInfo( MiscButton, To255( "Misc Menu" ) );
+  SetInstant( MiscButton );
+  AddControl( SimpleButton, MiscButton'unchecked_access, IsGlobal => true );
+  
+  Init( ProjButton, 41, DisplayInfo.V_Res-3, 50, DisplayInfo.V_Res-3, 'p' );
+  SetText( ProjButton, To255( "Proj" ) );
+  SetInfo( ProjButton, To255( "Change Project Parameters - optimization, debugging, ..." ) );
+  SetInstant( ProjButton );
+  AddControl( SimpleButton, ProjButton'unchecked_access, IsGlobal => true );
+  
+  --Init( ProjButton, 51, DisplayInfo.V_Res-3, 60, DisplayInfo.V_Res-3, 'p' );
+  --SetText( ProjButton, To255( "Proj" ) );
+  --SetInfo( ProjButton, To255( "Change Project Parameters - optimization, debugging, ..." ) );
+  --SetInstant( ProjButton );
+  --AddControl( SimpleButton, ProjButton'unchecked_access, IsGlobal => true );
+  
+  Init( AboutButton, 61, DisplayInfo.V_Res-3, 66, DisplayInfo.V_Res-3, '?' );
+  SetText( AboutButton, To255( "?" ) );
+  SetInfo( AboutButton, To255( "About this program" ) );
+  SetInstant( AboutButton );
+  AddControl( SimpleButton, AboutButton'unchecked_access, IsGlobal => true );
+ 
+  -- Wide Screen
+
+  if DisplayInfo.H_Res > 90 then
+
+    Init( QuickLabel, DisplayInfo.H_Res-20, 4, DisplayInfo.H_Res-1,
+       4 );
+    SetText( QuickLabel, "Quick Open" );
+    SetStyle( QuickLabel, Heading );
+    AddControl( StaticLine, QuickLabel'unchecked_access, false );
+
+    Init( OneButton, DisplayInfo.H_Res-20, 6, DisplayInfo.H_Res-1,
+       6, '1' );
+    SetText( OneButton, "1 " & QuickOpen1.path );
+    SetInfo( OneButton, To255( "Open this file" ) );
+    SetInstant( OneButton );
+    AddControl( SimpleButton, OneButton'unchecked_access, false );
+
+    Init( TwoButton, DisplayInfo.H_Res-20, 8, DisplayInfo.H_Res-1,
+       8, '2' );
+    SetText( TwoButton, "2 " & QuickOpen2.path );
+    SetInfo( TwoButton, To255( "Open this file" ) );
+    SetInstant( TwoButton );
+    AddControl( SimpleButton, TwoButton'unchecked_access, false );
+
+    Init( ThreeButton, DisplayInfo.H_Res-20, 10, DisplayInfo.H_Res-1,
+       10, '3' );
+    SetText( ThreeButton, "3 " & QuickOpen3.path );
+    SetInfo( ThreeButton, To255( "Open this file" ) );
+    SetInstant( ThreeButton );
+    AddControl( SimpleButton, ThreeButton'unchecked_access, false );
+
+    Init( FourButton, DisplayInfo.H_Res-20, 12, DisplayInfo.H_Res-1,
+       12, '4' );
+    SetText( FourButton, "4 " & QuickOpen4.path );
+    SetInfo( FourButton, To255( "Open this file" ) );
+    SetInstant( FourButton );
+    AddControl( SimpleButton, FourButton'unchecked_access, false );
+
+    Init( FiveButton, DisplayInfo.H_Res-20, 14, DisplayInfo.H_Res-1,
+       14, '5' );
+    SetText( FiveButton, "5 " & QuickOpen5.path );
+    SetInfo( FiveButton, To255( "Open this file" ) );
+    SetInstant( FiveButton );
+    AddControl( SimpleButton, FiveButton'unchecked_access, false );
+
+    Init( OtherButton, DisplayInfo.H_Res-20, 16, DisplayInfo.H_Res-1,
+       16, 'o' );
+    SetText( OtherButton, "Other ..." );
+    SetInfo( OtherButton, To255( "Open something else" ) );
+    SetInstant( OtherButton );
+    AddControl( SimpleButton, OtherButton'unchecked_access, false );
+
+  end if;
+
+  if length( SourcePath ) > 0 then
+     LoadList( SourcePath, SourceText );
+     SetList( SourceBox, SourceText );
+     Str255List.Clear( SourceText );
+  else
+     NewSource;
+     SetList( SourceBox, SourceText );
+     Str255List.Clear( SourceText );
+  end if;
+
+  SetThumb( SourceBar, 1 );
+  SetMax( SourceBar, GetLength( SourceBox ) );
+  SetScrollBar( SourceBox, 2 );
+  SetOwner( SourceBar, 1 );
+
+  loop
+    -- update quick buttons (should really check for changes
+    -- instead of a brute-force update of all buttons
+    if length( QuickOpen1.path ) = 0 then
+       SetStatus( OneButton, off );
+       SetText( OneButton, "1 - " );
+       SetInfo( OneButton, NullStr255 );
+    else
+       SetStatus( OneButton, standby );
+       SetText( OneButton, "1 " & QuickOpen1.path );
+       SetInfo( OneButton, QuickOpen1.path );
+    end if;
+    if length( QuickOpen2.path ) = 0 then
+       SetStatus( TwoButton, off );
+       SetText( TwoButton, "2 - " );
+       SetInfo( TwoButton, NullStr255 );
+    else
+       SetStatus( TwoButton, standby );
+       SetText( TwoButton, "2 " & QuickOpen2.path );
+       SetInfo( TwoButton, QuickOpen2.path );
+    end if;
+    if length( QuickOpen3.path ) = 0 then
+       SetStatus( ThreeButton, off );
+       SetText( ThreeButton, "3 - " );
+       SetInfo( ThreeButton, NullStr255 );
+    else
+       SetStatus( ThreeButton, standby );
+       SetText( ThreeButton, "3 " & QuickOpen3.path );
+       SetInfo( ThreeButton, QuickOpen3.path );
+    end if;
+    if length( QuickOpen4.path ) = 0 then
+       SetStatus( FourButton, off );
+       SetText( FourButton, "4 - " );
+       SetInfo( FourButton, NullStr255 );
+    else
+       SetStatus( FourButton, standby );
+       SetText( FourButton, "4 " & QuickOpen4.path );
+       SetInfo( FourButton, QuickOpen4.path );
+    end if;
+    if length( QuickOpen5.path ) = 0 then
+       SetStatus( FiveButton, off );
+       SetText( FiveButton, "5 - " );
+       SetInfo( FiveButton, NullStr255 );
+    else
+       SetStatus( FiveButton, standby );
+       SetText( FiveButton, "5 " & QuickOpen5.path );
+       SetInfo( FiveButton, QuickOpen5.path );
+    end if;
+    DrawWindow( Frame );
+
+    DoDialog( DT, HearInCB => InputCB );
+    case DT.control is
+    when 3 => FileMenu;
+    when 4 => EditMenu;
+    when 5 => FindMenu;
+    when 6 => MiscMenu;
+    when 7 => ProjectMenu;
+    when 8 => AboutProgram;
+    -- wide screen
+    when 10 => SwitchToNewFile( QuickOpen1 );
+      SetWindowTitle( GetWindowTitleFromPath( SourcePath ) );
+      DrawWindow( Frame );
+    when 11 => SwitchToNewFile( QuickOpen2 );
+      SetWindowTitle( GetWindowTitleFromPath( SourcePath ) );
+      DrawWindow( Frame );
+    when 12 => SwitchToNewFile( QuickOpen3 );
+      SetWindowTitle( GetWindowTitleFromPath( SourcePath ) );
+      DrawWindow( Frame );
+    when 13 => SwitchToNewFile( QuickOpen4 );
+      SetWindowTitle( GetWindowTitleFromPath( SourcePath ) );
+      DrawWindow( Frame );
+    when 14 => SwitchToNewFile( QuickOpen5 );
+      SetWindowTitle( GetWindowTitleFromPath( SourcePath ) );
+      DrawWindow( Frame );
+    when 15 => OpenSource;
+    when others => null;
+    end case;
+    exit when done;
+  end loop;
+SessionLog( "Closing main window" );
+  CloseWindow;
+end Main;
+
+procedure LoadOptions is
+  -- load the options in the options window from a file
+  TempList : Str255List.List;
+  TempStr  : Str255;
+  i        : integer;
+begin
+  if not IsFile( OptionsPath ) then
+     return; -- no file, use defaults
+  end if;
+  LoadList( OptionsPath, TempList );
+  Str255List.Pull( TempList, TempStr );
+  i := ToInteger( TempStr );
+  Opt_Quiet := i = 1; -- not used anymore
+  Str255List.Clear( TempList );
+end LoadOptions;
+
+procedure SaveOptions is
+  -- save the contents of the options window to a file
+  TempList : Str255List.List;
+  TempStr  : Str255;
+begin
+  TempStr := To255( integer'image( boolean'pos( Opt_Quiet ) ) ); -- not used anymore
+  Str255List.Queue( TempList, TempStr );
+  SaveList( OptionsPath, TempList );
+  if LastError /= CoreOK then
+     SessionLog( "SaveOptions: Error saving file", LastError );
+     StopAlert( "Error saving options: # " & AnErrorCode'image(
+       LastError ) );
+  end if;
+  Str255List.Clear( TempList );
+end SaveOptions;
+
+procedure LoadProject is
+-- Load a project.  If the path isn't known, assume
+-- it's a new project and set defaults.
+  TempList : Str255List.List;
+  TempStr  : Str255;
+  i        : integer;
+begin
+  SourcePath := NullStr255;
+  if not IsFile( ProjectPath ) then
+     NoteAlert( "Starting new project" );
+     return;
+  end if;
+  LoadList( ProjectPath, TempList );
+  if LastError /= 0 then
+     StopAlert( "Couldn't load " & ToString( ProjectPath ) );
+     return;
+  end if;
+  Str255List.Pull( TempList, Proj_MakeOptions );
+  Str255List.Pull( TempList, Proj_LinkOptions );
+  Str255List.Pull( TempList, Proj_Main );
+  Str255List.Pull( TempList, TempStr );
+  Proj_Opt := Short_Short_Integer( ToInteger( TempStr ) );
+  Str255List.Pull( TempList, TempStr );
+  Proj_CPU := Short_Short_Integer( ToInteger( TempStr ) );
+  Str255List.Pull( TempList, TempStr );
+  Proj_Debug := Short_Short_Integer( ToInteger( TempStr ) );
+  Str255List.Pull( TempList, TempStr );
+  Proj_Kind := Short_Short_Integer( ToInteger( TempStr ) );
+  Str255List.Pull( TempList, TempStr );
+  Proj_Builder := Short_Short_Integer( ToInteger( TempStr ) );
+  Str255List.Pull( TempList, TempStr );
+  i := ToInteger( TempStr );
+  Proj_Static := i = 1;
+  Str255List.Pull( TempList, TempStr );
+  i := ToInteger( TempStr );
+  Proj_Egcs := i = 1;
+  Str255List.Pull( TempList, TempStr );
+  i := ToInteger( TempStr );
+  --Proj_Quiet := i = 1; -- not used anymore
+  Str255List.Pull( TempList, SourcePath );
+  Str255List.Clear( TempList );
+  if IsFile( SourcePath ) then
+     UpdateQuickOpen( SourcePath, 1, 1 );
+  else
+     SourcePath := NullStr255;
+  end if;
+end LoadProject;
+
+procedure SaveProject is
+-- save project information.  If project has not pathname,
+-- assume it's a new project and prompt for a pathname.
+  TempList : Str255List.List;
+  TempStr  : Str255;
+  ssf      : ASelectSaveFileRec;
+begin
+  if length( ProjectPath ) = 0 then
+     ssf.Prompt := To255( "Save project as ..." );
+     ssf.Default := To255( "untitled.adp" );
+     SelectSaveFile( ssf );
+     if ssf.replied then
+        ProjectPath := ssf.path & "/" & ssf.fname;
+     else
+        NoteAlert( "Cancelled--project not saved" );
+        SessionLog( "Cancelled--project not saved" );
+     end if;
+  end if;
+  if length( ProjectPath ) > 0 then
+     Str255List.Queue( TempList, Proj_MakeOptions );
+     Str255List.Queue( TempList, Proj_LinkOptions );
+     Str255List.Queue( TempList, Proj_Main );
+     TempStr := To255( short_short_integer'image( Proj_Opt ) );
+     Str255List.Queue( TempList, TempStr );
+     TempStr := To255( short_short_integer'image( Proj_CPU ) );
+     Str255List.Queue( TempList, TempStr );
+     TempStr := To255( short_short_integer'image( Proj_Debug ) );
+     Str255List.Queue( TempList, TempStr );
+     TempStr := To255( short_short_integer'image( Proj_Kind ) );
+     Str255List.Queue( TempList, TempStr );
+     TempStr := To255( short_short_integer'image( Proj_Builder ) );
+     Str255List.Queue( TempList, TempStr );
+     TempStr := To255( integer'image( boolean'pos( Proj_Static ) ) );
+     Str255List.Queue( TempList, TempStr );
+     TempStr := To255( integer'image( boolean'pos( Proj_Egcs ) ) );
+     Str255List.Queue( TempList, TempStr );
+     --TempStr := To255( integer'image( boolean'pos( Proj_Quiet ) ) ); -- not used anymore
+     Str255List.Queue( TempList, TempStr );
+     Str255List.Queue( TempList, SourcePath );
+     SaveList( ProjectPath, TempList );
+     if LastError = CoreOK then
+        SessionLog( "Project saved as " & ProjectPath );
+     else
+        SessionLog( "SaveProject: Error saving file", LastError );
+        StopAlert( "Error saving file: # " & AnErrorCode'image(
+          LastError ) );
+     end if;
+  end if;
+  Str255List.Clear( TempList );
+end SaveProject;
+
+procedure Startup is
+begin
+  StartupCommon( "TIA", "tia" );
+  StartupOS;
+  StartupUserio;
+  -- should select black on console, blue for x
+  BlueBackground( blueOn => true ); -- black background
+  StartupControls;
+  StartupWindows;
+  InitBackground;
+  if Ada.Command_Line.Argument_Count > 0 then
+     ProjectPath := To255( Ada.Command_Line.Argument( 1 ) );
+     if Index( ProjectPath, ".adp" ) = 0 then
+        ProjectPath := ProjectPath & ".adp";
+     end if;
+     LoadProject;
+  else
+     SourcePath := NullStr255;
+  end if;
+  GetDisplayInfo( DisplayInfo );
+  LoadOptions;
+end Startup;
+
+procedure Shutdown is
+begin
+  SaveProject;
+  SaveOptions;
+  ShutdownWindows;
+  ShutdownControls;
+  ShutdownUserio;
+  ShutdownOS;
+  ShutdownCommon;
+end Shutdown;
+
+begin -- tia
+  Startup;
+  Main;
+  Shutdown;
+  exception when others =>
+     DrawErr( "Ada exception occurred" );
+     DrawErrLn;
+     DrawErr( "Shutting down..." );
+     DrawErrLn;
+     Shutdown;
+     raise;
+end tia;
